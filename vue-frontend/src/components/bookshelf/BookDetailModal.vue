@@ -4,12 +4,42 @@
  * 使用与原版bookshelf.html完全相同的HTML结构和CSS类名
  */
 
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useBookshelfStore } from '@/stores/bookshelfStore'
+import { useImageStore } from '@/stores/imageStore'
 import { getBookDetail } from '@/api/bookshelf'
 import { showToast } from '@/utils/toast'
 import BaseModal from '@/components/common/BaseModal.vue'
+import { scanFolder, processBatchUpload } from '@/composables/useBatchChapterUpload'
+
+// 批量上传相关类型
+interface BatchUploadSummary {
+  chapterCount: number
+  imageCount: number
+}
+
+interface BatchUploadProgressData {
+  currentChapter: number
+  totalChapters: number
+  currentChapterName: string
+  currentImage: number
+  totalImages: number
+  overallPercent: number
+}
+
+interface BatchUploadFailure {
+  chapterName: string
+  reason: string
+}
+
+interface BatchUploadResultData {
+  successCount: number
+  failedCount: number
+  failures: BatchUploadFailure[]
+}
+
+type BatchUploadState = 'idle' | 'scanning' | 'confirm' | 'uploading' | 'done'
 
 const emit = defineEmits<{
   close: []
@@ -18,6 +48,31 @@ const emit = defineEmits<{
 
 const router = useRouter()
 const bookshelfStore = useBookshelfStore()
+const imageStore = useImageStore()
+
+// 批量上传状态
+const batchUploadState = ref<BatchUploadState>('idle')
+const showBatchUploadConfirm = ref(false)
+const showBatchUploadProgress = ref(false)
+const showBatchUploadResult = ref(false)
+const showStoreWarning = ref(false)
+const showCancelUploadConfirm = ref(false)
+const batchUploadSummary = ref<BatchUploadSummary>({ chapterCount: 0, imageCount: 0 })
+const batchUploadProgress = ref<BatchUploadProgressData>({
+  currentChapter: 0,
+  totalChapters: 0,
+  currentChapterName: '',
+  currentImage: 0,
+  totalImages: 0,
+  overallPercent: 0,
+})
+const batchUploadResult = ref<BatchUploadResultData>({
+  successCount: 0,
+  failedCount: 0,
+  failures: [],
+})
+const batchUploadInputRef = ref<HTMLInputElement | null>(null)
+const selectedFiles = ref<FileList | null>(null)
 
 // 章节模态框状态
 const showChapterModal = ref(false)
@@ -187,6 +242,186 @@ function goToInsight() {
       },
     })
   }
+}
+
+// ==================== 批量上传 ====================
+
+// 打开批量上传（触发文件夹选择）
+function openBatchUpload() {
+  // 检查全局 store 是否有未保存的图片
+  if (imageStore.hasImages) {
+    showStoreWarning.value = true
+    return
+  }
+  triggerFolderSelect()
+}
+
+// 触发隐藏的文件夹选择 input
+function triggerFolderSelect() {
+  nextTick(() => {
+    batchUploadInputRef.value?.click()
+  })
+}
+
+// 用户确认继续上传（清除 store 警告后）
+let proceedAfterStoreWarning = () => {
+  showStoreWarning.value = false
+  // 如果是在确认弹窗阶段触发的警告，显示确认弹窗
+  if (batchUploadState.value === 'confirm' && selectedFiles.value) {
+    showBatchUploadConfirm.value = true
+  } else {
+    triggerFolderSelect()
+  }
+}
+
+// 处理文件夹选择
+async function handleBatchFolderSelect(event: Event) {
+  const input = event.target as HTMLInputElement
+  if (!input.files || input.files.length === 0) {
+    input.value = ''
+    return
+  }
+
+  batchUploadState.value = 'scanning'
+
+  // 使用 scanFolder 解析文件夹结构
+  const chapters = scanFolder(input.files)
+
+  const chapterCount = chapters.length
+  const imageCount = chapters.reduce((sum, ch) => sum + ch.files.length, 0)
+
+  batchUploadSummary.value = { chapterCount, imageCount }
+
+  // 保存 FileList 供后续上传使用
+  selectedFiles.value = input.files
+
+  // 如果全局 store 有未保存的图片，显示安全警告
+  if (imageStore.hasImages) {
+    showStoreWarning.value = true
+    batchUploadState.value = 'confirm'
+    input.value = ''
+    return
+  }
+
+  batchUploadState.value = 'confirm'
+  showBatchUploadConfirm.value = true
+
+  input.value = ''
+}
+
+// 关闭确认弹窗
+function closeBatchUploadConfirm() {
+  showBatchUploadConfirm.value = false
+  batchUploadState.value = 'idle'
+  selectedFiles.value = null
+}
+
+// 取消批量上传
+function cancelBatchUpload() {
+  showBatchUploadConfirm.value = false
+  batchUploadState.value = 'idle'
+  selectedFiles.value = null
+}
+
+// 确认开始上传
+async function confirmBatchUpload() {
+  if (!selectedFiles.value || !currentBook.value) return
+
+  showBatchUploadConfirm.value = false
+  batchUploadState.value = 'uploading'
+  showBatchUploadProgress.value = true
+
+  try {
+    const result = await processBatchUpload({
+      bookId: currentBook.value.id,
+      files: selectedFiles.value,
+      onProgress: (progress) => {
+        batchUploadProgress.value = progress
+      },
+      onConfirmOverwrite: async () => {
+        // 显示全局 store 安全警告弹窗，等待用户选择
+        showStoreWarning.value = true
+        // 返回一个 Promise，等待用户点击"继续上传"或"取消"
+        return new Promise<boolean>((resolve) => {
+          let resolved = false
+          const unwatch = watch(showStoreWarning, (val) => {
+            if (!val && !resolved) {
+              resolved = true
+              unwatch()
+              // 用户关闭弹窗，视为取消
+              resolve(false)
+            }
+          })
+          // 临时覆盖 proceedAfterStoreWarning 的 resolve 逻辑
+          const originalProceed = proceedAfterStoreWarning
+          proceedAfterStoreWarning = () => {
+            showStoreWarning.value = false
+            if (!resolved) {
+              resolved = true
+              unwatch()
+              resolve(true)
+            }
+            proceedAfterStoreWarning = originalProceed
+          }
+        })
+      },
+    })
+
+    showBatchUploadProgress.value = false
+    batchUploadState.value = 'done'
+
+    batchUploadResult.value = {
+      successCount: result.successCount,
+      failedCount: result.failedCount,
+      failures: result.failedChapters.map((f) => ({
+        chapterName: f.folderName,
+        reason: f.reason,
+      })),
+    }
+
+    showBatchUploadResult.value = true
+
+    // 如果成功章节数 > 0，刷新书籍详情
+    if (result.successCount > 0) {
+      await refreshBookDetail()
+    }
+  } catch (error) {
+    showBatchUploadProgress.value = false
+    batchUploadState.value = 'idle'
+    showToast('批量上传失败', 'error')
+    console.error('批量上传失败:', error)
+  } finally {
+    selectedFiles.value = null
+  }
+}
+
+// 关闭结果弹窗
+function closeBatchUploadResult() {
+  showBatchUploadResult.value = false
+  batchUploadState.value = 'idle'
+}
+
+// 处理模态框关闭（上传中拦截）
+function handleModalClose() {
+  if (batchUploadState.value === 'uploading') {
+    showCancelUploadConfirm.value = true
+  } else {
+    emit('close')
+  }
+}
+
+// 确认取消上传
+function confirmCancelUpload() {
+  showCancelUploadConfirm.value = false
+  batchUploadState.value = 'idle'
+  showBatchUploadProgress.value = false
+  selectedFiles.value = null
+  emit('close')
+}
+
+// 继续上传
+function dismissCancelUpload() {
+  showCancelUploadConfirm.value = false
 }
 
 // 处理章节排序
@@ -432,105 +667,130 @@ async function quickAddTagToBook(tagName: string) {
     title="书籍详情"
     size="large"
     custom-class="book-detail-modal"
-    :close-on-overlay="true"
-    :close-on-esc="true"
-    @close="emit('close')"
+    :close-on-overlay="batchUploadState !== 'uploading'"
+    :close-on-esc="batchUploadState !== 'uploading'"
+    @close="handleModalClose"
   >
-        <div v-if="currentBook" class="book-detail-container">
-          <!-- 书籍信息 - 与原版相同的垂直布局 -->
-          <div class="book-info-section">
-            <div class="book-cover-large">
-              <img
-                v-if="currentBook.cover"
-                :src="currentBook.cover"
-                alt="封面"
+    <div v-if="currentBook" class="book-detail-container">
+      <!-- 书籍信息 - 与原版相同的垂直布局 -->
+      <div class="book-info-section">
+        <div class="book-cover-large">
+          <img
+            v-if="currentBook.cover"
+            :src="currentBook.cover"
+            alt="封面"
+          >
+          <div v-else class="book-cover-placeholder">📖</div>
+        </div>
+        <div class="book-meta">
+          <h3>{{ currentBook.title }}</h3>
+          <p class="meta-item">
+            <span>标签：</span>
+            <span v-if="currentBook.tags && currentBook.tags.length > 0" class="detail-tags">
+              <span
+                v-for="tag in currentBook.tags"
+                :key="tag"
+                class="detail-tag"
+                :style="{ background: getTagColor(tag) }"
               >
-              <div v-else class="book-cover-placeholder">📖</div>
-            </div>
-            <div class="book-meta">
-              <h3>{{ currentBook.title }}</h3>
-              <p class="meta-item">
-                <span>标签：</span>
-                <span v-if="currentBook.tags && currentBook.tags.length > 0" class="detail-tags">
-                  <span
-                    v-for="tag in currentBook.tags"
-                    :key="tag"
-                    class="detail-tag"
-                    :style="{ background: getTagColor(tag) }"
-                  >
-                    {{ tag }}
-                    <span class="remove-detail-tag" @click.stop="removeTag(tag)">×</span>
-                  </span>
-                </span>
-                <span v-else class="no-tags-hint">暂无标签</span>
-                <button class="btn-add-tag" title="添加标签" @click="openAddTagModal">+</button>
-              </p>
-              <p class="meta-item"><span>章节数：</span><span>{{ chapters.length }}</span></p>
-              <p class="meta-item"><span>创建时间：</span><span>{{ formatDate(currentBook.created_at || currentBook.createdAt) }}</span></p>
-              <p class="meta-item"><span>最后更新：</span><span>{{ formatDate(currentBook.updated_at || currentBook.updatedAt) }}</span></p>
-              <div class="book-actions">
-                <button class="btn btn-sm btn-primary" @click="goToInsight">● 漫画分析</button>
-                <button class="btn btn-sm btn-secondary" @click="editCurrentBook">编辑书籍</button>
-                <button class="btn btn-sm btn-danger" @click="deleteCurrentBook">删除书籍</button>
-              </div>
-            </div>
+                {{ tag }}
+                <span class="remove-detail-tag" @click.stop="removeTag(tag)">×</span>
+              </span>
+            </span>
+            <span v-else class="no-tags-hint">暂无标签</span>
+            <button class="btn-add-tag" title="添加标签" @click="openAddTagModal">+</button>
+          </p>
+          <p class="meta-item"><span>章节数：</span><span>{{ chapters.length }}</span></p>
+          <p class="meta-item"><span>创建时间：</span><span>{{ formatDate(currentBook.created_at || currentBook.createdAt) }}</span></p>
+          <p class="meta-item"><span>最后更新：</span><span>{{ formatDate(currentBook.updated_at || currentBook.updatedAt) }}</span></p>
+          <div class="book-actions">
+            <button class="btn btn-sm btn-primary" @click="goToInsight">● 漫画分析</button>
+            <button class="btn btn-sm btn-secondary" @click="editCurrentBook">编辑书籍</button>
+            <button class="btn btn-sm btn-danger" @click="deleteCurrentBook">删除书籍</button>
           </div>
+        </div>
+      </div>
 
-          <!-- 章节列表 -->
-          <div class="chapters-section">
-            <div class="section-header">
-              <h3>章节列表</h3>
-              <button class="btn btn-sm btn-primary" @click="openCreateChapterModal">
-                <span class="btn-icon">+</span> 新建章节
-              </button>
+      <!-- 章节列表 -->
+      <div class="chapters-section">
+        <div class="section-header">
+          <h3>章节列表</h3>
+          <div class="section-header-actions">
+            <button
+              class="btn btn-sm btn-primary"
+              :disabled="batchUploadState === 'uploading'"
+              @click="openCreateChapterModal"
+            >
+              <span class="btn-icon">+</span> 新建章节
+            </button>
+            <button
+              class="btn btn-sm btn-secondary batch-upload-btn"
+              :disabled="batchUploadState === 'uploading'"
+              @click="openBatchUpload"
+            >
+              <span class="btn-icon">📁</span> 批量上传
+            </button>
+          </div>
+        </div>
+        <div v-if="chapters.length > 0" class="chapters-list">
+          <div
+            v-for="(chapter, index) in chapters"
+            :key="chapter.id"
+            class="chapter-item"
+            :class="{
+              dragging: draggedChapterIndex === index,
+              'drag-over': dragOverChapterIndex === index && draggedChapterIndex !== index
+            }"
+            draggable="true"
+            @dragstart="handleChapterDragStart($event, index)"
+            @dragover="handleChapterDragOver($event, index)"
+            @dragleave="handleChapterDragLeave"
+            @drop="handleChapterDrop($event, index)"
+            @dragend="handleChapterDragEnd"
+          >
+            <div class="chapter-drag-handle" title="拖拽排序">⋮⋮</div>
+            <div class="chapter-info">
+              <span class="chapter-order">#{{ index + 1 }}</span>
+              <span class="chapter-title">{{ chapter.title }}</span>
+              <span class="chapter-meta">{{ chapter.image_count || chapter.imageCount || 0 }} 张图片</span>
             </div>
-            <div v-if="chapters.length > 0" class="chapters-list">
-              <div
-                v-for="(chapter, index) in chapters"
-                :key="chapter.id"
-                class="chapter-item"
-                :class="{
-                  dragging: draggedChapterIndex === index,
-                  'drag-over': dragOverChapterIndex === index && draggedChapterIndex !== index
-                }"
-                draggable="true"
-                @dragstart="handleChapterDragStart($event, index)"
-                @dragover="handleChapterDragOver($event, index)"
-                @dragleave="handleChapterDragLeave"
-                @drop="handleChapterDrop($event, index)"
-                @dragend="handleChapterDragEnd"
+            <div class="chapter-actions">
+              <button
+                class="chapter-action-btn chapter-enter-btn"
+                :disabled="batchUploadState === 'uploading'"
+                @click="goToTranslate(chapter.id)"
               >
-                <div class="chapter-drag-handle" title="拖拽排序">⋮⋮</div>
-                <div class="chapter-info">
-                  <span class="chapter-order">#{{ index + 1 }}</span>
-                  <span class="chapter-title">{{ chapter.title }}</span>
-                  <span class="chapter-meta">{{ chapter.image_count || chapter.imageCount || 0 }} 张图片</span>
-                </div>
-                <div class="chapter-actions">
-                  <button class="chapter-action-btn chapter-enter-btn" @click="goToTranslate(chapter.id)">
-                    进入翻译
-                  </button>
-                  <button
-                    class="chapter-action-btn chapter-read-btn"
-                    :disabled="(chapter.image_count || chapter.imageCount || 0) === 0"
-                    @click="goToReader(chapter.id)"
-                  >
-                    进入阅读
-                  </button>
-                  <button class="chapter-action-btn" @click="openEditChapterModal(chapter.id)">
-                    编辑
-                  </button>
-                  <button class="chapter-action-btn danger" @click="deleteChapter(chapter.id)">
-                    删除
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div v-else class="empty-state-small">
-              <p>暂无章节，点击上方按钮创建</p>
+                进入翻译
+              </button>
+              <button
+                class="chapter-action-btn chapter-read-btn"
+                :disabled="(chapter.image_count || chapter.imageCount || 0) === 0 || batchUploadState === 'uploading'"
+                @click="goToReader(chapter.id)"
+              >
+                进入阅读
+              </button>
+              <button
+                class="chapter-action-btn"
+                :disabled="batchUploadState === 'uploading'"
+                @click="openEditChapterModal(chapter.id)"
+              >
+                编辑
+              </button>
+              <button
+                class="chapter-action-btn danger"
+                :disabled="batchUploadState === 'uploading'"
+                @click="deleteChapter(chapter.id)"
+              >
+                删除
+              </button>
             </div>
           </div>
         </div>
+        <div v-else class="empty-state-small">
+          <p>暂无章节，点击上方按钮创建</p>
+        </div>
+      </div>
+    </div>
   </BaseModal>
 
   <!-- 章节编辑模态框 -->
@@ -541,20 +801,20 @@ async function quickAddTagToBook(tagName: string) {
     :close-on-overlay="true"
     :close-on-esc="true"
   >
-        <div class="form-group">
-          <label for="chapterTitleInput">章节名称 <span class="required">*</span></label>
-          <input
-            id="chapterTitleInput"
-            v-model="chapterTitle"
-            type="text"
-            placeholder="例如：第1话、序章"
-            @keypress.enter="saveChapter"
-          >
-        </div>
-        <template #footer>
-          <button type="button" class="btn btn-secondary" @click="showChapterModal = false">取消</button>
-          <button type="button" class="btn btn-primary" @click="saveChapter">保存</button>
-        </template>
+    <div class="form-group">
+      <label for="chapterTitleInput">章节名称 <span class="required">*</span></label>
+      <input
+        id="chapterTitleInput"
+        v-model="chapterTitle"
+        type="text"
+        placeholder="例如：第1话、序章"
+        @keypress.enter="saveChapter"
+      >
+    </div>
+    <template #footer>
+      <button type="button" class="btn btn-secondary" @click="showChapterModal = false">取消</button>
+      <button type="button" class="btn btn-primary" @click="saveChapter">保存</button>
+    </template>
   </BaseModal>
 
   <BaseModal
@@ -565,53 +825,53 @@ async function quickAddTagToBook(tagName: string) {
     :close-on-esc="true"
     @close="closeAddTagModal"
   >
-          <!-- 【复刻原版】搜索/创建输入框 -->
-          <div class="quick-tag-input-wrapper">
-            <input
-              ref="quickTagInputRef"
-              v-model="quickTagFilter"
-              type="text"
-              class="quick-tag-input"
-              placeholder="输入标签名称进行搜索或创建..."
-              @keypress.enter="handleQuickTagInputEnter"
-            >
-          </div>
+    <!-- 【复刻原版】搜索/创建输入框 -->
+    <div class="quick-tag-input-wrapper">
+      <input
+        ref="quickTagInputRef"
+        v-model="quickTagFilter"
+        type="text"
+        class="quick-tag-input"
+        placeholder="输入标签名称进行搜索或创建..."
+        @keypress.enter="handleQuickTagInputEnter"
+      >
+    </div>
           
-          <!-- 【复刻原版】过滤后的可用标签列表 -->
-          <div class="quick-tag-list">
-            <!-- 可用标签 -->
-            <div
-              v-for="tag in filteredAvailableTags"
-              :key="tag.name"
-              class="quick-tag-item"
-              @click="quickAddTagToBook(tag.name)"
-            >
-              <span class="tag-color-dot" :style="{ background: tag.color || '#667eea' }"></span>
-              <span class="quick-tag-name">{{ tag.name }}</span>
-              <span class="tag-add-icon">+</span>
-            </div>
+    <!-- 【复刻原版】过滤后的可用标签列表 -->
+    <div class="quick-tag-list">
+      <!-- 可用标签 -->
+      <div
+        v-for="tag in filteredAvailableTags"
+        :key="tag.name"
+        class="quick-tag-item"
+        @click="quickAddTagToBook(tag.name)"
+      >
+        <span class="tag-color-dot" :style="{ background: tag.color || '#667eea' }"></span>
+        <span class="quick-tag-name">{{ tag.name }}</span>
+        <span class="tag-add-icon">+</span>
+      </div>
             
-            <!-- 创建新标签选项 -->
-            <div
-              v-if="showCreateNewTagOption"
-              class="quick-tag-item new-tag"
-              @click="quickAddTagToBook(quickTagFilter.trim())"
-            >
-              <span class="tag-icon">+</span>
-              <span>创建并添加 "{{ quickTagFilter.trim() }}"</span>
-            </div>
+      <!-- 创建新标签选项 -->
+      <div
+        v-if="showCreateNewTagOption"
+        class="quick-tag-item new-tag"
+        @click="quickAddTagToBook(quickTagFilter.trim())"
+      >
+        <span class="tag-icon">+</span>
+        <span>创建并添加 "{{ quickTagFilter.trim() }}"</span>
+      </div>
             
-            <!-- 无可用标签提示 -->
-            <p 
-              v-if="filteredAvailableTags.length === 0 && !showCreateNewTagOption" 
-              class="no-tags-hint"
-            >
-              {{ quickTagFilter ? '未找到匹配的标签' : '所有标签已添加或暂无标签' }}
-            </p>
-          </div>
-        <template #footer>
-          <button type="button" class="btn btn-secondary" @click="closeAddTagModal">关闭</button>
-        </template>
+      <!-- 无可用标签提示 -->
+      <p 
+        v-if="filteredAvailableTags.length === 0 && !showCreateNewTagOption" 
+        class="no-tags-hint"
+      >
+        {{ quickTagFilter ? '未找到匹配的标签' : '所有标签已添加或暂无标签' }}
+      </p>
+    </div>
+    <template #footer>
+      <button type="button" class="btn btn-secondary" @click="closeAddTagModal">关闭</button>
+    </template>
   </BaseModal>
 
   <!-- 删除确认模态框 -->
@@ -622,16 +882,143 @@ async function quickAddTagToBook(tagName: string) {
     :close-on-overlay="true"
     :close-on-esc="true"
   >
-          <p>
-            {{ deleteTarget === 'book' 
-              ? '确定要删除这本书籍吗？所有章节数据将一并删除，此操作不可恢复。' 
-              : '确定要删除这个章节吗？此操作不可恢复。' 
-            }}
-          </p>
-        <template #footer>
-          <button type="button" class="btn btn-secondary" @click="showDeleteConfirm = false">取消</button>
-          <button type="button" class="btn btn-danger" @click="confirmDelete">删除</button>
-        </template>
+    <p>
+      {{ deleteTarget === 'book'
+        ? '确定要删除这本书籍吗？所有章节数据将一并删除，此操作不可恢复。'
+        : '确定要删除这个章节吗？此操作不可恢复。'
+      }}
+    </p>
+    <template #footer>
+      <button type="button" class="btn btn-secondary" @click="showDeleteConfirm = false">取消</button>
+      <button type="button" class="btn btn-danger" @click="confirmDelete">删除</button>
+    </template>
+  </BaseModal>
+
+  <!-- 隐藏的文件夹选择 input -->
+  <input
+    ref="batchUploadInputRef"
+    type="file"
+    webkitdirectory
+    directory
+    class="batch-upload-input-hidden"
+    @change="handleBatchFolderSelect"
+  >
+
+  <!-- 批量上传确认摘要弹窗 -->
+  <BaseModal
+    v-model="showBatchUploadConfirm"
+    title="批量上传确认"
+    size="small"
+    :close-on-overlay="false"
+    :close-on-esc="true"
+    @close="closeBatchUploadConfirm"
+  >
+    <div class="batch-upload-confirm-content">
+      <p class="batch-upload-summary-text">
+        发现 <strong>{{ batchUploadSummary.chapterCount }}</strong> 个章节，共 <strong>{{ batchUploadSummary.imageCount }}</strong> 张图片
+      </p>
+      <p class="batch-upload-hint">点击确认开始上传，上传过程可能需要一些时间。</p>
+    </div>
+    <template #footer>
+      <button type="button" class="btn btn-secondary" @click="cancelBatchUpload">取消</button>
+      <button type="button" class="btn btn-primary" @click="confirmBatchUpload">确认上传</button>
+    </template>
+  </BaseModal>
+
+  <!-- 上传进度覆盖层 -->
+  <Transition name="batch-upload-fade">
+    <div v-if="showBatchUploadProgress" class="batch-upload-progress-overlay">
+      <div class="batch-upload-progress-panel">
+        <h4 class="batch-upload-progress-title">正在批量上传章节</h4>
+        <div class="batch-upload-progress-chapter">
+          正在上传第 {{ batchUploadProgress.currentChapter }}/{{ batchUploadProgress.totalChapters }} 章：{{ batchUploadProgress.currentChapterName }}
+        </div>
+        <div class="batch-upload-progress-images">
+          图片 {{ batchUploadProgress.currentImage }}/{{ batchUploadProgress.totalImages }}
+        </div>
+        <div class="batch-upload-progress-bar-container">
+          <div class="batch-upload-progress-bar" :style="{ width: batchUploadProgress.overallPercent + '%' }"></div>
+        </div>
+        <div class="batch-upload-progress-percent">{{ batchUploadProgress.overallPercent }}%</div>
+      </div>
+    </div>
+  </Transition>
+
+  <!-- 结果摘要弹窗 -->
+  <BaseModal
+    v-model="showBatchUploadResult"
+    title="批量上传完成"
+    size="small"
+    :close-on-overlay="true"
+    :close-on-esc="true"
+    @close="closeBatchUploadResult"
+  >
+    <div class="batch-upload-result-content">
+      <div class="batch-upload-result-stats">
+        <div class="batch-upload-result-stat success">
+          <span class="stat-label">成功</span>
+          <span class="stat-value">{{ batchUploadResult.successCount }}</span>
+        </div>
+        <div class="batch-upload-result-stat error">
+          <span class="stat-label">失败</span>
+          <span class="stat-value">{{ batchUploadResult.failedCount }}</span>
+        </div>
+      </div>
+      <div v-if="batchUploadResult.failures.length > 0" class="batch-upload-failures">
+        <p class="batch-upload-failures-title">失败详情：</p>
+        <ul class="batch-upload-failures-list">
+          <li v-for="(failure, index) in batchUploadResult.failures" :key="index">
+            <strong>{{ failure.chapterName }}</strong>：{{ failure.reason }}
+          </li>
+        </ul>
+      </div>
+    </div>
+    <template #footer>
+      <button type="button" class="btn btn-primary" @click="closeBatchUploadResult">确定</button>
+    </template>
+  </BaseModal>
+
+  <!-- 全局 Store 安全警告弹窗 -->
+  <BaseModal
+    v-model="showStoreWarning"
+    title="警告"
+    size="small"
+    :close-on-overlay="true"
+    :close-on-esc="true"
+  >
+    <div class="store-warning-content">
+      <p class="store-warning-icon">⚠️</p>
+      <p class="store-warning-text">
+        当前有未保存的翻译工作，继续将清除现有图片。
+      </p>
+      <p class="store-warning-hint">建议先保存当前会话，再进行批量上传。</p>
+    </div>
+    <template #footer>
+      <button type="button" class="btn btn-secondary" @click="showStoreWarning = false">取消</button>
+      <button type="button" class="btn btn-danger" @click="proceedAfterStoreWarning">继续上传</button>
+    </template>
+  </BaseModal>
+
+  <!-- 取消上传确认弹窗 -->
+  <BaseModal
+    v-model="showCancelUploadConfirm"
+    title="确认取消"
+    size="small"
+    :close-on-overlay="false"
+    :close-on-esc="true"
+    @close="dismissCancelUpload"
+  >
+    <div class="cancel-upload-confirm-content">
+      <p class="cancel-upload-icon">⏹️</p>
+      <p class="cancel-upload-text">
+        上传进行中，确定要取消吗？
+      </p>
+      <p class="cancel-upload-hint">取消后已上传的章节将保留。</p>
+    </div>
+    <template #footer>
+      <button type="button" class="btn btn-secondary" @click="dismissCancelUpload">继续上传</button>
+      <button type="button" class="btn btn-danger" @click="confirmCancelUpload">取消上传</button>
+    </template>
   </BaseModal>
 </template>
 
@@ -913,6 +1300,229 @@ async function quickAddTagToBook(tagName: string) {
 
 /* ==================== 【复刻原版】快速添加标签样式 ==================== */
 
+/* ==================== 批量上传样式 ==================== */
+
+/* 章节头部按钮组 */
+.section-header-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 批量上传按钮 */
+.batch-upload-btn .btn-icon {
+  margin-right: 4px;
+}
+
+/* 隐藏的文件输入框 */
+.batch-upload-input-hidden {
+  display: none;
+}
+
+/* 批量上传确认弹窗内容 */
+.batch-upload-confirm-content {
+  text-align: center;
+  padding: 8px 0;
+}
+
+.batch-upload-summary-text {
+  font-size: 1rem;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+  line-height: 1.5;
+}
+
+.batch-upload-summary-text strong {
+  color: #667eea;
+  font-size: 1.2rem;
+}
+
+.batch-upload-hint {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* 上传进度覆盖层 */
+.batch-upload-progress-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1200;
+}
+
+.batch-upload-progress-panel {
+  background: var(--modal-bg, #fff);
+  border-radius: 12px;
+  padding: 32px 40px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  text-align: center;
+}
+
+.batch-upload-progress-title {
+  margin: 0 0 20px 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.batch-upload-progress-chapter {
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.batch-upload-progress-images {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+}
+
+.batch-upload-progress-bar-container {
+  width: 100%;
+  height: 8px;
+  background: var(--hover-bg);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.batch-upload-progress-bar {
+  height: 100%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.batch-upload-progress-percent {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #667eea;
+}
+
+/* 进度覆盖层过渡动画 */
+.batch-upload-fade-enter-active,
+.batch-upload-fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+
+.batch-upload-fade-enter-active .batch-upload-progress-panel,
+.batch-upload-fade-leave-active .batch-upload-progress-panel {
+  transition: transform 0.25s ease;
+}
+
+.batch-upload-fade-enter-from,
+.batch-upload-fade-leave-to {
+  opacity: 0;
+}
+
+.batch-upload-fade-enter-from .batch-upload-progress-panel,
+.batch-upload-fade-leave-to .batch-upload-progress-panel {
+  transform: scale(0.92);
+}
+
+/* 结果摘要弹窗 */
+.batch-upload-result-content {
+  padding: 4px 0;
+}
+
+.batch-upload-result-stats {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.batch-upload-result-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px;
+  border-radius: 10px;
+  background: var(--hover-bg);
+}
+
+.batch-upload-result-stat.success {
+  background: rgba(40, 167, 69, 0.1);
+}
+
+.batch-upload-result-stat.error {
+  background: rgba(220, 53, 69, 0.1);
+}
+
+.batch-upload-result-stat .stat-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.batch-upload-result-stat .stat-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+}
+
+.batch-upload-result-stat.success .stat-value {
+  color: #28a745;
+}
+
+.batch-upload-result-stat.error .stat-value {
+  color: #dc3545;
+}
+
+.batch-upload-failures-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 10px 0;
+}
+
+.batch-upload-failures-list {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.batch-upload-failures-list li {
+  margin-bottom: 4px;
+}
+
+/* 全局 Store 安全警告 */
+.store-warning-content {
+  text-align: center;
+  padding: 8px 0;
+}
+
+.store-warning-icon {
+  font-size: 2.5rem;
+  margin: 0 0 12px 0;
+}
+
+.store-warning-text {
+  font-size: 1rem;
+  color: var(--text-primary);
+  font-weight: 500;
+  margin: 0 0 8px 0;
+}
+
+.store-warning-hint {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* ==================== 【复刻原版】快速添加标签样式 ==================== */
+
 /* 快速标签输入框包装 */
 .quick-tag-input-wrapper {
     margin-bottom: 16px;
@@ -1018,6 +1628,30 @@ async function quickAddTagToBook(tagName: string) {
     color: var(--text-secondary);
     font-style: italic;
     padding: 24px 16px;
+    margin: 0;
+}
+
+/* 取消上传确认弹窗 */
+.cancel-upload-confirm-content {
+    text-align: center;
+    padding: 8px 0;
+}
+
+.cancel-upload-icon {
+    font-size: 2.5rem;
+    margin: 0 0 12px 0;
+}
+
+.cancel-upload-text {
+    font-size: 1rem;
+    color: var(--text-primary);
+    font-weight: 500;
+    margin: 0 0 8px 0;
+}
+
+.cancel-upload-hint {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
     margin: 0;
 }
 </style>
