@@ -128,7 +128,7 @@ export const useSettingsStore = defineStore('settings', () => {
         ensureNumericTypes()
 
         // 【复刻原版】左侧边栏文字设置始终使用默认值，不从 localStorage 恢复
-        settings.value.textStyle = { ...defaults.textStyle }
+        // settings.value.textStyle = { ...defaults.textStyle }
 
         // 确保 translatePrompt 与当前翻译模式和 JSON 模式同步（4个独立存储字段之一）
         const t = settings.value.translation
@@ -383,8 +383,8 @@ export const useSettingsStore = defineStore('settings', () => {
         applyBackendSettings(backendSettings)
 
         // 【复刻原版】左侧边栏文字设置始终使用默认值，不从后端恢复
-        const defaults = createDefaultSettings()
-        settings.value.textStyle = { ...defaults.textStyle }
+        // const defaults = createDefaultSettings()
+        // settings.value.textStyle = { ...defaults.textStyle }
 
         saveToStorage()
         saveProviderConfigsToStorage()

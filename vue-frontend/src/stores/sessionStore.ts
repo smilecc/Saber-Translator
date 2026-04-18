@@ -506,19 +506,19 @@ export const useSessionStore = defineStore('session', () => {
           ? (inpaintValue as ValidInpaintMethod)
           : settingsStore.settings.textStyle.inpaintMethod
 
-        settingsStore.updateTextStyle({
-          fontSize: (uiSettings.fontSize as number) || settingsStore.settings.textStyle.fontSize,
-          autoFontSize: (uiSettings.autoFontSize as boolean) ?? settingsStore.settings.textStyle.autoFontSize,
-          fontFamily: (uiSettings.fontFamily as string) || settingsStore.settings.textStyle.fontFamily,
-          layoutDirection: (uiSettings.layoutDirection as 'vertical' | 'horizontal' | 'auto') || settingsStore.settings.textStyle.layoutDirection,
-          textColor: (uiSettings.textColor as string) || settingsStore.settings.textStyle.textColor,
-          fillColor: (uiSettings.fillColor as string) || settingsStore.settings.textStyle.fillColor,
-          inpaintMethod,
-          strokeEnabled: (uiSettings.strokeEnabled as boolean) ?? settingsStore.settings.textStyle.strokeEnabled,
-          strokeColor: (uiSettings.strokeColor as string) || settingsStore.settings.textStyle.strokeColor,
-          strokeWidth: (uiSettings.strokeWidth as number) || settingsStore.settings.textStyle.strokeWidth,
-          useAutoTextColor: (uiSettings.useAutoTextColor as boolean) ?? settingsStore.settings.textStyle.useAutoTextColor,
-        })
+        // settingsStore.updateTextStyle({
+        //   fontSize: (uiSettings.fontSize as number) || settingsStore.settings.textStyle.fontSize,
+        //   autoFontSize: (uiSettings.autoFontSize as boolean) ?? settingsStore.settings.textStyle.autoFontSize,
+        //   fontFamily: (uiSettings.fontFamily as string) || settingsStore.settings.textStyle.fontFamily,
+        //   layoutDirection: (uiSettings.layoutDirection as 'vertical' | 'horizontal' | 'auto') || settingsStore.settings.textStyle.layoutDirection,
+        //   textColor: (uiSettings.textColor as string) || settingsStore.settings.textStyle.textColor,
+        //   fillColor: (uiSettings.fillColor as string) || settingsStore.settings.textStyle.fillColor,
+        //   inpaintMethod,
+        //   strokeEnabled: (uiSettings.strokeEnabled as boolean) ?? settingsStore.settings.textStyle.strokeEnabled,
+        //   strokeColor: (uiSettings.strokeColor as string) || settingsStore.settings.textStyle.strokeColor,
+        //   strokeWidth: (uiSettings.strokeWidth as number) || settingsStore.settings.textStyle.strokeWidth,
+        //   useAutoTextColor: (uiSettings.useAutoTextColor as boolean) ?? settingsStore.settings.textStyle.useAutoTextColor,
+        // })
 
         console.log('UI 设置已恢复')
       }

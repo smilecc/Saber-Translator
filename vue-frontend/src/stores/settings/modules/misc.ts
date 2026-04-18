@@ -47,6 +47,8 @@ export function useMiscSettings(
    */
   function updateTextStyle(updates: Partial<TextStyleSettings>): void {
     Object.assign(settings.value.textStyle, updates)
+    saveToStorage()
+    console.error('updateTextStyle', updates);
   }
 
   // ============================================================

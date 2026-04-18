@@ -57,21 +57,21 @@ export function useTextStyleSync() {
     function syncImageToSidebar(image: typeof imageStore.currentImage) {
         if (!image) return
 
-        const currentStyle = settingsStore.settings.textStyle
+        // const currentStyle = settingsStore.settings.textStyle
 
-        settingsStore.updateTextStyle({
-            fontSize: image.fontSize ?? currentStyle.fontSize,
-            autoFontSize: image.autoFontSize ?? currentStyle.autoFontSize,
-            fontFamily: image.fontFamily ?? currentStyle.fontFamily,
-            layoutDirection: image.layoutDirection ?? currentStyle.layoutDirection,
-            textColor: image.textColor ?? currentStyle.textColor,
-            fillColor: image.fillColor ?? currentStyle.fillColor,
-            strokeEnabled: image.strokeEnabled ?? currentStyle.strokeEnabled,
-            strokeColor: image.strokeColor ?? currentStyle.strokeColor,
-            strokeWidth: image.strokeWidth ?? currentStyle.strokeWidth,
-            inpaintMethod: image.inpaintMethod ?? currentStyle.inpaintMethod,
-            useAutoTextColor: image.useAutoTextColor ?? currentStyle.useAutoTextColor
-        })
+        // settingsStore.updateTextStyle({
+        //     fontSize: image.fontSize ?? currentStyle.fontSize,
+        //     autoFontSize: image.autoFontSize ?? currentStyle.autoFontSize,
+        //     fontFamily: image.fontFamily ?? currentStyle.fontFamily,
+        //     layoutDirection: image.layoutDirection ?? currentStyle.layoutDirection,
+        //     textColor: image.textColor ?? currentStyle.textColor,
+        //     fillColor: image.fillColor ?? currentStyle.fillColor,
+        //     strokeEnabled: image.strokeEnabled ?? currentStyle.strokeEnabled,
+        //     strokeColor: image.strokeColor ?? currentStyle.strokeColor,
+        //     strokeWidth: image.strokeWidth ?? currentStyle.strokeWidth,
+        //     inpaintMethod: image.inpaintMethod ?? currentStyle.inpaintMethod,
+        //     useAutoTextColor: image.useAutoTextColor ?? currentStyle.useAutoTextColor
+        // })
     }
 
     /**
