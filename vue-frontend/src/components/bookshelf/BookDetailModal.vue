@@ -299,14 +299,11 @@ async function handleBatchFolderSelect(event: Event) {
   if (imageStore.hasImages) {
     showStoreWarning.value = true
     batchUploadState.value = 'confirm'
-    input.value = ''
     return
   }
 
   batchUploadState.value = 'confirm'
   showBatchUploadConfirm.value = true
-
-  input.value = ''
 }
 
 // 关闭确认弹窗
@@ -330,6 +327,8 @@ async function confirmBatchUpload() {
   showBatchUploadConfirm.value = false
   batchUploadState.value = 'uploading'
   showBatchUploadProgress.value = true
+
+  debugger;
 
   try {
     const result = await processBatchUpload({
